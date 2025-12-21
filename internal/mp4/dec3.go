@@ -16,54 +16,16 @@ func init() {
 // Dec3 is the E-AC-3 decoder configuration box (EC3SpecificBox).
 // This implements the structure defined in ETSI TS 102 366.
 //
-// Note: This implementation supports the common case of a single independent
-// substream with no dependent substreams. For content with multiple substreams,
-// the raw Payload field can be used.
+// The dec3 box has variable length depending on NumDepSub:
+// - When NumDepSub = 0: 5 bytes (40 bits) - 1 reserved bit after NumDepSub
+// - When NumDepSub > 0: 6 bytes (48 bits) - 9-bit ChanLoc after NumDepSub
+//
+// We use raw bytes for parsing to handle this variable structure.
 type Dec3 struct {
 	amp4.Box
 
-	// DataRate is the peak data rate in kbps (13 bits).
-	DataRate uint16 `mp4:"0,size=13"`
-
-	// NumIndSub is the number of independent substreams minus 1 (3 bits).
-	// A value of 0 means 1 independent substream.
-	NumIndSub uint8 `mp4:"1,size=3"`
-
-	// Fields for the first (primary) independent substream:
-
-	// Fscod is the sample rate code (2 bits).
-	// 0 = 48 kHz, 1 = 44.1 kHz, 2 = 32 kHz, 3 = reserved.
-	Fscod uint8 `mp4:"2,size=2"`
-
-	// Bsid is the bit stream identification (5 bits).
-	// For E-AC-3, this should be 16.
-	Bsid uint8 `mp4:"3,size=5"`
-
-	// Reserved1 is a reserved bit, always 0 (1 bit).
-	Reserved1 uint8 `mp4:"4,size=1,const=0"`
-
-	// Asvc indicates if this is an associated audio service (1 bit).
-	Asvc uint8 `mp4:"5,size=1"`
-
-	// Bsmod is the bit stream mode (3 bits).
-	Bsmod uint8 `mp4:"6,size=3"`
-
-	// Acmod is the audio coding mode (3 bits).
-	Acmod uint8 `mp4:"7,size=3"`
-
-	// LfeOn indicates if the LFE channel is present (1 bit).
-	LfeOn uint8 `mp4:"8,size=1"`
-
-	// Reserved2 is reserved (3 bits).
-	Reserved2 uint8 `mp4:"9,size=3,const=0"`
-
-	// NumDepSub is the number of dependent substreams (4 bits).
-	NumDepSub uint8 `mp4:"10,size=4"`
-
-	// ChanLoc is the channel location bitmap (9 bits).
-	// Only present when NumDepSub > 0, otherwise 1 reserved bit.
-	// For simplicity, we always include the 9-bit field.
-	ChanLoc uint16 `mp4:"11,size=9"`
+	// Raw payload - we parse/marshal manually due to variable length
+	Payload []byte `mp4:"0,size=8,len=dynamic"`
 }
 
 // GetType returns the box type for dec3.
@@ -71,21 +33,60 @@ func (*Dec3) GetType() amp4.BoxType {
 	return amp4.StrToBoxType("dec3")
 }
 
+// GetFieldLength returns the length for dynamic fields.
+func (d *Dec3) GetFieldLength(name string, ctx amp4.Context) uint {
+	switch name {
+	case "Payload":
+		return amp4.LengthUnlimited
+	}
+	panic("invalid field name: " + name)
+}
+
 // ToCodec converts the Dec3 box to a CodecEAC3.
 func (d *Dec3) ToCodec(sampleRate, channelCount int) *mp4.CodecEAC3 {
+	if len(d.Payload) < 5 {
+		// Not enough data, return minimal codec
+		return &mp4.CodecEAC3{
+			SampleRate:   sampleRate,
+			ChannelCount: channelCount,
+		}
+	}
+
+	// Parse the dec3 payload
+	// Byte 0-1: data_rate (13 bits) + num_ind_sub (3 bits)
+	dataRate := (uint16(d.Payload[0]) << 5) | (uint16(d.Payload[1]) >> 3)
+	numIndSub := d.Payload[1] & 0x07
+
+	// Byte 2-3: fscod (2) + bsid (5) + reserved (1) + asvc (1) + bsmod (3) + acmod (3) + lfeon (1)
+	fscod := d.Payload[2] >> 6
+	bsid := (d.Payload[2] >> 1) & 0x1F
+	asvc := (d.Payload[3] >> 7) & 0x01
+	bsmod := (d.Payload[3] >> 4) & 0x07
+	acmod := (d.Payload[3] >> 1) & 0x07
+	lfeon := d.Payload[3] & 0x01
+
+	// Byte 4: reserved (3) + num_dep_sub (4) + (reserved (1) OR start of chan_loc)
+	numDepSub := (d.Payload[4] >> 1) & 0x0F
+
+	var chanLoc uint16
+	if numDepSub > 0 && len(d.Payload) >= 6 {
+		// chan_loc is 9 bits: 1 bit from byte 4 + 8 bits from byte 5
+		chanLoc = (uint16(d.Payload[4]&0x01) << 8) | uint16(d.Payload[5])
+	}
+
 	return &mp4.CodecEAC3{
 		SampleRate:   sampleRate,
 		ChannelCount: channelCount,
-		DataRate:     d.DataRate,
-		NumIndSub:    d.NumIndSub,
-		Fscod:        d.Fscod,
-		Bsid:         d.Bsid,
-		Asvc:         d.Asvc != 0,
-		Bsmod:        d.Bsmod,
-		Acmod:        d.Acmod,
-		LfeOn:        d.LfeOn != 0,
-		NumDepSub:    d.NumDepSub,
-		ChanLoc:      d.ChanLoc,
+		DataRate:     dataRate,
+		NumIndSub:    numIndSub,
+		Fscod:        fscod,
+		Bsid:         bsid,
+		Asvc:         asvc != 0,
+		Bsmod:        bsmod,
+		Acmod:        acmod,
+		LfeOn:        lfeon != 0,
+		NumDepSub:    numDepSub,
+		ChanLoc:      chanLoc,
 	}
 }
 
@@ -98,16 +99,33 @@ func FromCodec(codec *mp4.CodecEAC3) *Dec3 {
 	if codec.LfeOn {
 		lfeon = 1
 	}
+
+	// Build the payload
+	// Byte 0-1: data_rate (13 bits) + num_ind_sub (3 bits)
+	byte0 := uint8(codec.DataRate >> 5)
+	byte1 := uint8((codec.DataRate&0x1F)<<3) | (codec.NumIndSub & 0x07)
+
+	// Byte 2: fscod (2) + bsid (5) + reserved (1)
+	byte2 := (codec.Fscod << 6) | ((codec.Bsid & 0x1F) << 1)
+
+	// Byte 3: asvc (1) + bsmod (3) + acmod (3) + lfeon (1)
+	byte3 := (asvc << 7) | ((codec.Bsmod & 0x07) << 4) | ((codec.Acmod & 0x07) << 1) | lfeon
+
+	if codec.NumDepSub > 0 {
+		// 6 bytes: with chan_loc
+		// Byte 4: reserved (3) + num_dep_sub (4) + chan_loc high bit
+		byte4 := ((codec.NumDepSub & 0x0F) << 1) | uint8((codec.ChanLoc>>8)&0x01)
+		// Byte 5: chan_loc low 8 bits
+		byte5 := uint8(codec.ChanLoc & 0xFF)
+		return &Dec3{
+			Payload: []byte{byte0, byte1, byte2, byte3, byte4, byte5},
+		}
+	}
+
+	// 5 bytes: no chan_loc, just 1 reserved bit
+	// Byte 4: reserved (3) + num_dep_sub (4) + reserved (1)
+	byte4 := (codec.NumDepSub & 0x0F) << 1
 	return &Dec3{
-		DataRate:  codec.DataRate,
-		NumIndSub: codec.NumIndSub,
-		Fscod:     codec.Fscod,
-		Bsid:      codec.Bsid,
-		Asvc:      asvc,
-		Bsmod:     codec.Bsmod,
-		Acmod:     codec.Acmod,
-		LfeOn:     lfeon,
-		NumDepSub: codec.NumDepSub,
-		ChanLoc:   codec.ChanLoc,
+		Payload: []byte{byte0, byte1, byte2, byte3, byte4},
 	}
 }
