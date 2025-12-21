@@ -154,6 +154,7 @@ func (i *Init) Unmarshal(r io.ReadSeeker) error {
 		waitingAudioEsds
 		waitingDOps
 		waitingDac3
+		waitingDec3
 		waitingPcmC
 	)
 
@@ -558,12 +559,23 @@ func (i *Init) Unmarshal(r io.ReadSeeker) error {
 				}
 				eac3 := box.(*amp4.AudioSampleEntry)
 
-				// E-AC-3 (Enhanced AC-3 / Dolby Digital Plus)
-				// Create codec directly from sample entry as dec3 box parsing is not supported
-				curTrack.Codec = &mp4.CodecEAC3{
-					SampleRate:   int(eac3.SampleRate / 65536),
-					ChannelCount: int(eac3.ChannelCount),
+				sampleRate = int(eac3.SampleRate / 65536)
+				channelCount = int(eac3.ChannelCount)
+				state = waitingDec3
+				return h.Expand()
+
+			case "dec3":
+				if state != waitingDec3 {
+					return nil, fmt.Errorf("unexpected box '%v'", h.BoxInfo.Type)
 				}
+
+				box, _, err := h.ReadPayload()
+				if err != nil {
+					return nil, err
+				}
+				dec3 := box.(*imp4.Dec3)
+
+				curTrack.Codec = dec3.ToCodec(sampleRate, channelCount)
 				state = waitingTrak
 
 			case "ipcm":
