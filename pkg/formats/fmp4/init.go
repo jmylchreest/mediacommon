@@ -547,6 +547,25 @@ func (i *Init) Unmarshal(r io.ReadSeeker) error {
 				}
 				state = waitingTrak
 
+			case "ec-3":
+				if state != waitingCodec {
+					return nil, fmt.Errorf("unexpected box '%v'", h.BoxInfo.Type)
+				}
+
+				box, _, err := h.ReadPayload()
+				if err != nil {
+					return nil, err
+				}
+				eac3 := box.(*amp4.AudioSampleEntry)
+
+				// E-AC-3 (Enhanced AC-3 / Dolby Digital Plus)
+				// Create codec directly from sample entry as dec3 box parsing is not supported
+				curTrack.Codec = &mp4.CodecEAC3{
+					SampleRate:   int(eac3.SampleRate / 65536),
+					ChannelCount: int(eac3.ChannelCount),
+				}
+				state = waitingTrak
+
 			case "ipcm":
 				if state != waitingCodec {
 					return nil, fmt.Errorf("unexpected box '%v'", h.BoxInfo.Type)

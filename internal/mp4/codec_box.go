@@ -36,6 +36,8 @@ func WriteCodecBoxes(w *Writer, codec mp4.Codec, trackID int, info *CodecInfo, a
 		|    |esds|
 		|ac-3| (AC-3)
 		|    |dac3|
+		|ec-3| (E-AC-3 / Dolby Digital Plus)
+		|    |dec3|
 		|ipcm| (LPCM)
 		|    |pcmC|
 	*/
@@ -555,6 +557,38 @@ func WriteCodecBoxes(w *Writer, codec mp4.Codec, trackID int, info *CodecInfo, a
 				return 0
 			}(),
 			BitRateCode: codec.BitRateCode,
+		})
+		if err != nil {
+			return err
+		}
+
+	case *mp4.CodecEAC3:
+		_, err := w.WriteBoxStart(&amp4.AudioSampleEntry{ // <ec-3>
+			SampleEntry: amp4.SampleEntry{
+				AnyTypeBox: amp4.AnyTypeBox{
+					Type: amp4.StrToBoxType("ec-3"),
+				},
+				DataReferenceIndex: 1,
+			},
+			ChannelCount: uint16(codec.ChannelCount),
+			SampleSize:   16,
+			SampleRate:   uint32(codec.SampleRate * 65536),
+		})
+		if err != nil {
+			return err
+		}
+
+		// Write dec3 box with minimal configuration
+		// dec3 box structure (simplified):
+		// - data_rate (13 bits) + num_ind_sub (3 bits) = 2 bytes
+		// - fscod (2) + bsid (5) + reserved (1) + asvc (1) + bsmod (3) + acmod (3) + lfeon (1) = 2 bytes
+		// - reserved (3) + num_dep_sub (4) + chan_loc (9) if num_dep_sub > 0 = 2 bytes optional
+		// For simplicity, write a minimal dec3 with default values
+		_, err = w.WriteBox(&Dec3{
+			Payload: []byte{
+				0x00, 0x00, // data_rate (0) + num_ind_sub (0 = 1 independent substream)
+				0x20, 0x0F, // fscod=0 (48kHz), bsid=16 (E-AC-3), bsmod=0, acmod=7 (3/2), lfeon=1
+			},
 		})
 		if err != nil {
 			return err
